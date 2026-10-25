@@ -55,11 +55,12 @@ using namespace Gdiplus;
 
 #define BTN_Y        596
 #define BTN_H        44
-#define BTN_W        136
-#define BTN1_X       33
-#define BTN2_X       (BTN1_X + BTN_W + 10)
-#define BTN3_X       (BTN2_X + BTN_W + 10)
-#define BTN4_X       (BTN3_X + BTN_W + 10)
+#define BTN_W        112
+#define BTN1_X       24
+#define BTN2_X       (BTN1_X + BTN_W + 8)
+#define BTN3_X       (BTN2_X + BTN_W + 8)
+#define BTN4_X       (BTN3_X + BTN_W + 8)
+#define BTN5_X       (BTN4_X + BTN_W + 8)
 
 #define REWARD_X     270
 #define REWARD_Y     662
@@ -110,6 +111,20 @@ struct State {
     bool     dirty = false;
 };
 
+// 速度参数：一轮 = 6 次点击（4 个数字 + 确定 + 清零）
+// 单轮总时长 = 6*(holdMs + gapMs) + submitMs + clearMs
+struct SpeedCfg {
+    int holdMs   = 15;      // 每次点击按住时长
+    int gapMs    = 20;      // 两次点击之间的间隔
+    int submitMs = 350;     // 点确定后等待判定（固定）
+    int clearMs  = 30;      // 点清零后等待（固定）
+};
+static SpeedCfg g_speed;
+
+static int SpeedRoundMs() {
+    return 6 * (g_speed.holdMs + g_speed.gapMs) + g_speed.submitMs + g_speed.clearMs;
+}
+
 static State     g_st;
 static HWND      g_hwnd = NULL;
 static HINSTANCE g_inst = NULL;
@@ -141,6 +156,12 @@ static std::wstring JoinPath(const std::wstring& a, const wchar_t* b) {
 static bool FileExists(const std::wstring& p) {
     DWORD a = GetFileAttributesW(p.c_str());
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static int ClampI(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }
 
 static COLORREF ScreenColor(int x, int y) {
@@ -360,6 +381,7 @@ static RECT BtnRect(int id) {
     if (id == 1) x = BTN2_X;
     if (id == 2) x = BTN3_X;
     if (id == 3) x = BTN4_X;
+    if (id == 4) x = BTN5_X;
     RECT r = { x, BTN_Y, x + BTN_W, BTN_Y + BTN_H };
     return r;
 }
@@ -502,7 +524,7 @@ static void Paint(HDC hdc) {
         RECT rc = CloseRect();
         RectF rf;
         RectToRectF(rc, rf);
-        bool hot = (g_st.hover == 3);
+        bool hot = (g_st.hover == 10);
         GraphicsPath path;
         MakeRoundRect(rf, 9.0f, path);
         SolidBrush fill(Color(static_cast<BYTE>(hot ? 110 : 40), 255, 120, 120));
@@ -598,14 +620,15 @@ static void Paint(HDC hdc) {
     DrawButton(g, BtnRect(0), g_st.capturing ? L"取消校准" : L"开始校准", 0, true);
     DrawButton(g, BtnRect(1), L"测试移动", 1, !g_st.capturing);
     DrawButton(g, BtnRect(2), L"保存配置", 2, true);
-    DrawButton(g, BtnRect(3), L"开始穷举", 5, !g_st.capturing);
+    DrawButton(g, BtnRect(3), L"速度设置", 3, !g_st.capturing);
+    DrawButton(g, BtnRect(4), L"开始穷举", 4, !g_st.capturing);
 
     // reward 图
     {
         RECT rr = RewardRect();
         RectF rcf;
         RectToRectF(rr, rcf);
-        bool hot = (g_st.hover == 4);
+        bool hot = (g_st.hover == 5);
         if (g_reward) {
             GraphicsPath clip;
             MakeRoundRect(rcf, 18.0f, clip);
@@ -642,12 +665,13 @@ static void UpdateHover() {
     g_st.hover = -1;
     g_st.hoverRow = -1;
 
-    if (PtInRect(CloseRect(), p.x, p.y)) g_st.hover = 3;
+    if (PtInRect(CloseRect(), p.x, p.y)) g_st.hover = 10;
     else if (PtInRect(BtnRect(0), p.x, p.y)) g_st.hover = 0;
     else if (PtInRect(BtnRect(1), p.x, p.y)) g_st.hover = 1;
     else if (PtInRect(BtnRect(2), p.x, p.y)) g_st.hover = 2;
-    else if (PtInRect(BtnRect(3), p.x, p.y)) g_st.hover = 5;
-    else if (PtInRect(RewardRect(), p.x, p.y)) g_st.hover = 4;
+    else if (PtInRect(BtnRect(3), p.x, p.y)) g_st.hover = 3;
+    else if (PtInRect(BtnRect(4), p.x, p.y)) g_st.hover = 4;
+    else if (PtInRect(RewardRect(), p.x, p.y)) g_st.hover = 5;
     else {
         for (int i = 0; i < T_COUNT; ++i) {
             if (PtInRect(RowRect(i), p.x, p.y)) { g_st.hoverRow = i; break; }
@@ -785,6 +809,9 @@ static void SaveCoords() {
 
     fprintf(f, "  \"tolerance\": 30,\n");
     fprintf(f, "  \"stop_on_hit\": false,\n");
+    fprintf(f, "  \"round_ms\": %d,\n", SpeedRoundMs());
+    fprintf(f, "  \"hold_ms\": %d,\n", g_speed.holdMs);
+    fprintf(f, "  \"gap_ms\": %d,\n", g_speed.gapMs);
 
     if (g_st.has[T_FAILCLOSE])
         fprintf(f, "  \"fail_close_point\": [%ld, %ld],\n",
@@ -872,6 +899,18 @@ static bool JsonGetTriple(const std::string& j, const char* key, int& r, int& g,
     return true;
 }
 
+static bool JsonGetInt(const std::string& j, const char* key, int& v) {
+    size_t pos = j.find(key);
+    if (pos == std::string::npos) return false;
+    const char* p = SkipToNum(j.c_str() + pos + strlen(key));
+    if (!*p) return false;
+    char* e = NULL;
+    long a = strtol(p, &e, 10);
+    if (e == p) return false;
+    v = (int)a;
+    return true;
+}
+
 static int ColorDiff(COLORREF a, COLORREF b) {
     int dr = (int)GetRValue(a) - (int)GetRValue(b);
     int dg = (int)GetGValue(a) - (int)GetGValue(b);
@@ -917,6 +956,10 @@ static void LoadCoordsToUI() {
         g_st.hasCol[T_WATCH] = true;
     }
 
+    int sp = 0;
+    if (JsonGetInt(j, "\"hold_ms\"", sp)) g_speed.holdMs = ClampI(sp, 5, 500);
+    if (JsonGetInt(j, "\"gap_ms\"", sp)) g_speed.gapMs = ClampI(sp, 0, 2000);
+
     int rec = 0;
     for (int i = 0; i < T_COUNT; ++i) {
         if (g_st.has[i]) ++rec;
@@ -936,7 +979,7 @@ static void DoClick(int x, int y) {
     in[1].type = INPUT_MOUSE;
     in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
     SendInput(2, in, sizeof(INPUT));
-    Sleep(15);
+    Sleep(g_speed.holdMs);
 }
 
 // ============================ 初始密码对话框 ============================
@@ -1139,12 +1182,12 @@ static void RunBrute() {
             int d = code[i] - '0';
             int ti = KeyIdx(d);
             DoClick((int)g_st.pt[ti].x, (int)g_st.pt[ti].y);
-            Sleep(20);
+            Sleep(g_speed.gapMs);
         }
         if (aborted) break;
 
         DoClick((int)g_st.pt[T_SUBMIT].x, (int)g_st.pt[T_SUBMIT].y);
-        Sleep(350);
+        Sleep(g_speed.submitMs);
 
         if (hasBase && g_st.has[T_WATCH]) {
             COLORREF cur = ScreenColor((int)g_st.pt[T_WATCH].x, (int)g_st.pt[T_WATCH].y);
@@ -1164,7 +1207,7 @@ static void RunBrute() {
         }
 
         DoClick((int)g_st.pt[T_CLEAR].x, (int)g_st.pt[T_CLEAR].y);
-        Sleep(30);
+        Sleep(g_speed.clearMs);
 
         done = idx;
         if (log) {
@@ -1190,6 +1233,192 @@ static void RunBrute() {
     InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
+// ============================ 速度设置对话框 ============================
+
+struct SpeedDlgState {
+    HWND roundEdit;
+    HWND holdEdit;
+    HWND gapEdit;
+    HWND advChk;
+    bool updating;
+};
+static SpeedDlgState g_sd;
+
+static int EditInt(HWND e) {
+    wchar_t b[32] = {0};
+    GetWindowTextW(e, b, 32);
+    return _wtoi(b);
+}
+
+static void EditSetInt(HWND e, int v) {
+    wchar_t b[32];
+    swprintf(b, 32, L"%d", v);
+    SetWindowTextW(e, b);
+}
+
+// 由「点击时长 + 间隔」反推总时长
+static void SpeedApplyFromHoldGap() {
+    g_speed.holdMs = ClampI(g_speed.holdMs, 5, 500);
+    g_speed.gapMs = ClampI(g_speed.gapMs, 0, 2000);
+    int t = SpeedRoundMs();
+    g_sd.updating = true;
+    EditSetInt(g_sd.roundEdit, t);
+    g_sd.updating = false;
+}
+
+// 由「单轮总时长」按当前比例拆出点击时长 + 间隔
+static void SpeedApplyFromRound(int roundMs) {
+    roundMs = ClampI(roundMs, 200, 60000);
+    int clickPart = roundMs - g_speed.submitMs - g_speed.clearMs;
+    int minPart = 6 * 5;
+    if (clickPart < minPart) clickPart = minPart;
+    int per = clickPart / 6;
+    int total = g_speed.holdMs + g_speed.gapMs;
+    int h = (total > 0) ? (per * g_speed.holdMs) / total : per / 2;
+    if (h < 5) h = 5;
+    int g = per - h;
+    if (g < 0) g = 0;
+    g_speed.holdMs = h;
+    g_speed.gapMs = g;
+    g_sd.updating = true;
+    EditSetInt(g_sd.holdEdit, h);
+    EditSetInt(g_sd.gapEdit, g);
+    g_sd.updating = false;
+}
+
+static LRESULT CALLBACK SpeedProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        int code = HIWORD(wp);
+        if (id == 1) {
+            g_speed.holdMs = ClampI(EditInt(g_sd.holdEdit), 5, 500);
+            g_speed.gapMs = ClampI(EditInt(g_sd.gapEdit), 0, 2000);
+            SaveCoords();
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (id == 2) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (id == 20 && code == BN_CLICKED) {
+            bool on = (SendMessageW(g_sd.advChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            EnableWindow(g_sd.holdEdit, on);
+            EnableWindow(g_sd.gapEdit, on);
+            return 0;
+        }
+        if (g_sd.updating) return 0;
+        if (id == 10 && code == EN_CHANGE) {
+            SpeedApplyFromRound(EditInt(g_sd.roundEdit));
+            return 0;
+        }
+        if ((id == 11 || id == 12) && code == EN_CHANGE) {
+            g_speed.holdMs = EditInt(g_sd.holdEdit);
+            g_speed.gapMs = EditInt(g_sd.gapEdit);
+            SpeedApplyFromHoldGap();
+            return 0;
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void ShowSpeedDlg() {
+    HINSTANCE hi = GetModuleHandleW(NULL);
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {0};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = SpeedProc;
+        wc.hInstance = hi;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"SpeedDlgWnd";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    g_sd.updating = true;
+
+    int W = 460, H = 316;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"SpeedDlgWnd", L"速度设置",
+                               WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                               0, 0, W, H, g_hwnd, NULL, hi, NULL);
+    if (!dlg) return;
+
+    RECT pr;
+    GetWindowRect(g_hwnd, &pr);
+    SetWindowPos(dlg, NULL, pr.left + ((pr.right - pr.left) - W) / 2,
+                 pr.top + ((pr.bottom - pr.top) - H) / 2, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER);
+
+    CreateWindowExW(0, L"STATIC", L"单轮总时长（毫秒）", WS_CHILD | WS_VISIBLE,
+                    20, 18, 200, 22, dlg, NULL, hi, NULL);
+    g_sd.roundEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0000",
+                                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                     230, 16, 90, 26, dlg, (HMENU)10, hi, NULL);
+    CreateWindowExW(0, L"STATIC", L"越小越快", WS_CHILD | WS_VISIBLE,
+                    330, 18, 100, 22, dlg, NULL, hi, NULL);
+
+    g_sd.advChk = CreateWindowExW(0, L"BUTTON", L"高级选项：单独设置每次点击时长与间隔",
+                                  WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                  20, 58, 400, 24, dlg, (HMENU)20, hi, NULL);
+
+    CreateWindowExW(0, L"STATIC", L"每次点击按住时长（毫秒）", WS_CHILD | WS_VISIBLE,
+                    20, 96, 200, 22, dlg, NULL, hi, NULL);
+    g_sd.holdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0000",
+                                    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                    230, 94, 90, 26, dlg, (HMENU)11, hi, NULL);
+
+    CreateWindowExW(0, L"STATIC", L"两次点击之间间隔（毫秒）", WS_CHILD | WS_VISIBLE,
+                    20, 134, 200, 22, dlg, NULL, hi, NULL);
+    g_sd.gapEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0000",
+                                   WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
+                                   230, 132, 90, 26, dlg, (HMENU)12, hi, NULL);
+
+    CreateWindowExW(0, L"STATIC",
+                    L"判定等待 350ms 和清零等待 30ms 是固定值，不参与加速。",
+                    WS_CHILD | WS_VISIBLE, 20, 176, 420, 22, dlg, NULL, hi, NULL);
+    CreateWindowExW(0, L"STATIC",
+                    L"改总时长会自动折算高级选项，改高级选项会自动更新总时长。",
+                    WS_CHILD | WS_VISIBLE, 20, 200, 420, 22, dlg, NULL, hi, NULL);
+
+    CreateWindowExW(0, L"BUTTON", L"确定", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                    170, 255, 110, 34, dlg, (HMENU)1, hi, NULL);
+    CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE,
+                    300, 255, 110, 34, dlg, (HMENU)2, hi, NULL);
+
+    EditSetInt(g_sd.roundEdit, SpeedRoundMs());
+    EditSetInt(g_sd.holdEdit, g_speed.holdMs);
+    EditSetInt(g_sd.gapEdit, g_speed.gapMs);
+    EnableWindow(g_sd.holdEdit, FALSE);
+    EnableWindow(g_sd.gapEdit, FALSE);
+
+    g_sd.updating = false;
+
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(g_sd.roundEdit);
+    SendMessageW(g_sd.roundEdit, EM_SETSEL, 0, -1);
+    EnableWindow(g_hwnd, FALSE);
+
+    MSG msg;
+    while (IsWindow(dlg) && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (!IsDialogMessageW(dlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    EnableWindow(g_hwnd, TRUE);
+    SetForegroundWindow(g_hwnd);
+    InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
 // ============================ 窗口过程 ============================
 
 static void OnClick(int x, int y) {
@@ -1210,7 +1439,8 @@ static void OnClick(int x, int y) {
     }
     if (PtInRect(BtnRect(1), x, y)) { StartTest(); return; }
     if (PtInRect(BtnRect(2), x, y)) { SaveCoords(); return; }
-    if (PtInRect(BtnRect(3), x, y)) { RunBrute(); return; }
+    if (PtInRect(BtnRect(3), x, y)) { ShowSpeedDlg(); return; }
+    if (PtInRect(BtnRect(4), x, y)) { RunBrute(); return; }
 
     if (PtInRect(RewardRect(), x, y)) {
         std::wstring p = JoinPath(g_exeDir, L"reward.png");
@@ -1296,6 +1526,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (PtInRect(BtnRect(1), p.x, p.y)) return HTCLIENT;
         if (PtInRect(BtnRect(2), p.x, p.y)) return HTCLIENT;
         if (PtInRect(BtnRect(3), p.x, p.y)) return HTCLIENT;
+        if (PtInRect(BtnRect(4), p.x, p.y)) return HTCLIENT;
         if (PtInRect(RewardRect(), p.x, p.y)) return HTCLIENT;
         for (int i = 0; i < T_COUNT; ++i) {
             if (PtInRect(RowRect(i), p.x, p.y)) return HTCLIENT;

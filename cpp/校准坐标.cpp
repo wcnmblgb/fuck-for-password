@@ -1233,94 +1233,289 @@ static void RunBrute() {
     InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
-// ============================ 速度设置对话框 ============================
+// ============================ 速度设置面板（液态玻璃自绘） ============================
 
-struct SpeedDlgState {
-    HWND roundEdit;
-    HWND holdEdit;
-    HWND gapEdit;
-    HWND advChk;
-    bool updating;
+#define SP_W  440
+#define SP_H  344
+
+enum {
+    SP_NONE = 0,
+    SP_CLOSE,
+    SP_R_MINUS, SP_R_PLUS,
+    SP_ADV,
+    SP_H_MINUS, SP_H_PLUS,
+    SP_G_MINUS, SP_G_PLUS,
+    SP_OK, SP_CANCEL
 };
-static SpeedDlgState g_sd;
 
-static int EditInt(HWND e) {
-    wchar_t b[32] = {0};
-    GetWindowTextW(e, b, 32);
-    return _wtoi(b);
+static HWND g_spHwnd = NULL;
+static int  g_spHot = SP_NONE;
+static bool g_spAdv = false;
+static bool g_spDragging = false;
+static POINT g_spDrag = {0, 0};
+
+static RECT SpRect(int id) {
+    RECT r;
+    switch (id) {
+    case SP_CLOSE:   { RECT t = {400, 14, 428, 42}; r = t; break; }
+    case SP_R_MINUS: { RECT t = {250, 62, 282, 94}; r = t; break; }
+    case SP_R_PLUS:  { RECT t = {390, 62, 422, 94}; r = t; break; }
+    case SP_ADV:     { RECT t = {22, 114, 250, 144}; r = t; break; }
+    case SP_H_MINUS: { RECT t = {250, 156, 282, 188}; r = t; break; }
+    case SP_H_PLUS:  { RECT t = {390, 156, 422, 188}; r = t; break; }
+    case SP_G_MINUS: { RECT t = {250, 200, 282, 232}; r = t; break; }
+    case SP_G_PLUS:  { RECT t = {390, 200, 422, 232}; r = t; break; }
+    case SP_OK:      { RECT t = {236, 288, 336, 324}; r = t; break; }
+    case SP_CANCEL:  { RECT t = {104, 288, 204, 324}; r = t; break; }
+    default:         { RECT t = {0, 0, 0, 0}; r = t; break; }
+    }
+    return r;
 }
 
-static void EditSetInt(HWND e, int v) {
-    wchar_t b[32];
-    swprintf(b, 32, L"%d", v);
-    SetWindowTextW(e, b);
-}
-
-// 由「点击时长 + 间隔」反推总时长
-static void SpeedApplyFromHoldGap() {
-    g_speed.holdMs = ClampI(g_speed.holdMs, 5, 500);
-    g_speed.gapMs = ClampI(g_speed.gapMs, 0, 2000);
-    int t = SpeedRoundMs();
-    g_sd.updating = true;
-    EditSetInt(g_sd.roundEdit, t);
-    g_sd.updating = false;
-}
-
-// 由「单轮总时长」按当前比例拆出点击时长 + 间隔
-static void SpeedApplyFromRound(int roundMs) {
-    roundMs = ClampI(roundMs, 200, 60000);
-    int clickPart = roundMs - g_speed.submitMs - g_speed.clearMs;
-    int minPart = 6 * 5;
-    if (clickPart < minPart) clickPart = minPart;
+// 由「单轮总时长」按当前比例拆出 按住时长 + 间隔
+static void SpeedApplyRound(int ms) {
+    ms = ClampI(ms, 200, 60000);
+    int clickPart = ms - g_speed.submitMs - g_speed.clearMs;
+    if (clickPart < 30) clickPart = 30;
     int per = clickPart / 6;
     int total = g_speed.holdMs + g_speed.gapMs;
     int h = (total > 0) ? (per * g_speed.holdMs) / total : per / 2;
     if (h < 5) h = 5;
-    int g = per - h;
-    if (g < 0) g = 0;
+    int g2 = per - h;
+    if (g2 < 0) g2 = 0;
     g_speed.holdMs = h;
-    g_speed.gapMs = g;
-    g_sd.updating = true;
-    EditSetInt(g_sd.holdEdit, h);
-    EditSetInt(g_sd.gapEdit, g);
-    g_sd.updating = false;
+    g_speed.gapMs = g2;
 }
 
-static LRESULT CALLBACK SpeedProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+static void DrawSpButton(Graphics& g, const RECT& rc, const wchar_t* label,
+                         bool hot, bool enabled, float radius) {
+    RectF rf;
+    RectToRectF(rc, rf);
+    GraphicsPath p;
+    MakeRoundRect(rf, radius, p);
+    LinearGradientBrush fill(
+        PointF(rf.X, rf.Y), PointF(rf.X, rf.Y + rf.Height),
+        Color(hot ? 120 : 70, 24, 30, 46), Color(hot ? 72 : 40, 12, 14, 24));
+    g.FillPath(&fill, &p);
+    Pen pen(Color(enabled ? 200 : 80, 255, 255, 255), 1.15f);
+    g.DrawPath(&pen, &p);
+    DrawTextGlass(g, label, rf, 17.0f, StringAlignmentCenter,
+                  enabled ? 245 : 110, true);
+}
+
+static void SpPaint(HDC hdc) {
+    Graphics g(hdc);
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+
+    SolidBrush bg(Color(255, 13, 15, 22));
+    g.FillRectangle(&bg, 0, 0, SP_W, SP_H);
+
+    RectF panel(1.0f, 1.0f, (REAL)(SP_W - 2), (REAL)(SP_H - 2));
+    DrawGlassPanel(g, panel, 20.0f, 175, 125);
+
+    DrawTextGlass(g, L"速度设置", RectF(26, 12, 240, 32), 18.0f,
+                  StringAlignmentNear, 245, true);
+
+    {
+        RECT rc = SpRect(SP_CLOSE);
+        RectF rf;
+        RectToRectF(rc, rf);
+        bool hot = (g_spHot == SP_CLOSE);
+        GraphicsPath p;
+        MakeRoundRect(rf, 8.0f, p);
+        SolidBrush fill(Color(hot ? 110 : 40, 255, 120, 120));
+        g.FillPath(&fill, &p);
+        DrawTextGlass(g, L"✕", rf, 13.0f, StringAlignmentCenter, 230, false);
+    }
+
+    DrawTextGlass(g, L"单轮总时长", RectF(26, 62, 200, 32), 14.5f,
+                  StringAlignmentNear, 230, false);
+    DrawSpButton(g, SpRect(SP_R_MINUS), L"-", g_spHot == SP_R_MINUS, true, 9.0f);
+    DrawSpButton(g, SpRect(SP_R_PLUS), L"+", g_spHot == SP_R_PLUS, true, 9.0f);
+    {
+        wchar_t b[32];
+        swprintf(b, 32, L"%d", SpeedRoundMs());
+        DrawTextGlass(g, b, RectF(284, 62, 100, 32), 18.0f,
+                      StringAlignmentCenter, 255, true);
+
+    }
+
+    {
+        RECT cb = { 26, 118, 46, 138 };
+        RectF rf;
+        RectToRectF(cb, rf);
+        GraphicsPath p;
+        MakeRoundRect(rf, 5.0f, p);
+        SolidBrush fill(Color(g_spAdv ? 210 : 60, 120, 160, 255));
+        g.FillPath(&fill, &p);
+        Pen pen(Color(210, 255, 255, 255), 1.2f);
+        g.DrawPath(&pen, &p);
+        if (g_spAdv) {
+            Pen tick(Color(255, 255, 255, 255), 2.0f);
+            g.DrawLine(&tick, (REAL)cb.left + 4, (REAL)cb.top + 10,
+                       (REAL)cb.left + 9, (REAL)cb.top + 15);
+            g.DrawLine(&tick, (REAL)cb.left + 9, (REAL)cb.top + 15,
+                       (REAL)cb.left + 17, (REAL)cb.top + 5);
+        }
+        DrawTextGlass(g, L"高级选项：单独设置点击时长与间隔",
+                      RectF(56, 114, 340, 28), 13.0f, StringAlignmentNear,
+                      g_spAdv ? 240 : 165, false);
+    }
+
+    BYTE al = g_spAdv ? 230 : 105;
+    BYTE valA = g_spAdv ? 255 : 115;
+
+    DrawTextGlass(g, L"每次点击按住", RectF(46, 156, 190, 32), 13.5f,
+                  StringAlignmentNear, al, false);
+    DrawSpButton(g, SpRect(SP_H_MINUS), L"-", g_spHot == SP_H_MINUS, g_spAdv, 9.0f);
+    DrawSpButton(g, SpRect(SP_H_PLUS), L"+", g_spHot == SP_H_PLUS, g_spAdv, 9.0f);
+    {
+        wchar_t b[32];
+        swprintf(b, 32, L"%d", g_speed.holdMs);
+        DrawTextGlass(g, b, RectF(284, 156, 100, 32), 16.0f,
+                      StringAlignmentCenter, valA, true);
+    }
+
+    DrawTextGlass(g, L"两次点击间隔", RectF(46, 200, 190, 32), 13.5f,
+                  StringAlignmentNear, al, false);
+    DrawSpButton(g, SpRect(SP_G_MINUS), L"-", g_spHot == SP_G_MINUS, g_spAdv, 9.0f);
+    DrawSpButton(g, SpRect(SP_G_PLUS), L"+", g_spHot == SP_G_PLUS, g_spAdv, 9.0f);
+    {
+        wchar_t b[32];
+        swprintf(b, 32, L"%d", g_speed.gapMs);
+        DrawTextGlass(g, b, RectF(284, 200, 100, 32), 16.0f,
+                      StringAlignmentCenter, valA, true);
+    }
+
+    DrawTextGlass(g, L"总时长 = 6 x (按住 + 间隔) + 判定 350 + 清零 30",
+                  RectF(26, 242, 400, 22), 11.5f, StringAlignmentNear, 150, false);
+    DrawTextGlass(g, L"改总时长会自动折算下面两项，反过来也一样",
+                  RectF(26, 262, 400, 22), 11.5f, StringAlignmentNear, 150, false);
+
+    DrawSpButton(g, SpRect(SP_CANCEL), L"取消", g_spHot == SP_CANCEL, true, 18.0f);
+    DrawSpButton(g, SpRect(SP_OK), L"确定", g_spHot == SP_OK, true, 18.0f);
+}
+
+static LRESULT CALLBACK SpeedWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_COMMAND: {
-        int id = LOWORD(wp);
-        int code = HIWORD(wp);
-        if (id == 1) {
-            g_speed.holdMs = ClampI(EditInt(g_sd.holdEdit), 5, 500);
-            g_speed.gapMs = ClampI(EditInt(g_sd.gapEdit), 0, 2000);
-            SaveCoords();
-            DestroyWindow(hwnd);
+    case WM_MOUSEMOVE: {
+        POINT p;
+        p.x = GET_X_LPARAM(lp);
+        p.y = GET_Y_LPARAM(lp);
+        if (g_spDragging) {
+            RECT wr;
+            GetWindowRect(hwnd, &wr);
+            SetWindowPos(hwnd, NULL, wr.left - g_spDrag.x + p.x,
+                         wr.top - g_spDrag.y + p.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
             return 0;
         }
-        if (id == 2) {
-            DestroyWindow(hwnd);
+        int hot = SP_NONE;
+        int ids[10] = { SP_CLOSE, SP_R_MINUS, SP_R_PLUS, SP_ADV,
+                        SP_H_MINUS, SP_H_PLUS, SP_G_MINUS, SP_G_PLUS,
+                        SP_OK, SP_CANCEL };
+        for (int i = 0; i < 10; ++i) {
+            RECT r = SpRect(ids[i]);
+            if (PtInRect(r, p.x, p.y)) { hot = ids[i]; break; }
+        }
+        if (hot != g_spHot) {
+            g_spHot = hot;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        POINT p;
+        p.x = GET_X_LPARAM(lp);
+        p.y = GET_Y_LPARAM(lp);
+
+        if (p.y < 54 && p.x < 380) {
+            g_spDragging = true;
+            g_spDrag = p;
+            SetCapture(hwnd);
             return 0;
         }
-        if (id == 20 && code == BN_CLICKED) {
-            bool on = (SendMessageW(g_sd.advChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            EnableWindow(g_sd.holdEdit, on);
-            EnableWindow(g_sd.gapEdit, on);
+
+        RECT rc;
+        rc = SpRect(SP_CLOSE);
+        if (PtInRect(rc, p.x, p.y)) { DestroyWindow(hwnd); return 0; }
+        rc = SpRect(SP_CANCEL);
+        if (PtInRect(rc, p.x, p.y)) { DestroyWindow(hwnd); return 0; }
+        rc = SpRect(SP_OK);
+        if (PtInRect(rc, p.x, p.y)) { SaveCoords(); DestroyWindow(hwnd); return 0; }
+        rc = SpRect(SP_ADV);
+        if (PtInRect(rc, p.x, p.y)) {
+            g_spAdv = !g_spAdv;
+            InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
-        if (g_sd.updating) return 0;
-        if (id == 10 && code == EN_CHANGE) {
-            SpeedApplyFromRound(EditInt(g_sd.roundEdit));
+        rc = SpRect(SP_R_MINUS);
+        if (PtInRect(rc, p.x, p.y)) {
+            SpeedApplyRound(SpeedRoundMs() - 20);
+            InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
-        if ((id == 11 || id == 12) && code == EN_CHANGE) {
-            g_speed.holdMs = EditInt(g_sd.holdEdit);
-            g_speed.gapMs = EditInt(g_sd.gapEdit);
-            SpeedApplyFromHoldGap();
+        rc = SpRect(SP_R_PLUS);
+        if (PtInRect(rc, p.x, p.y)) {
+            SpeedApplyRound(SpeedRoundMs() + 20);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        rc = SpRect(SP_H_MINUS);
+        if (PtInRect(rc, p.x, p.y)) {
+            if (!g_spAdv) return 0;
+            g_speed.holdMs = ClampI(g_speed.holdMs - 1, 5, 500);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        rc = SpRect(SP_H_PLUS);
+        if (PtInRect(rc, p.x, p.y)) {
+            if (!g_spAdv) return 0;
+            g_speed.holdMs = ClampI(g_speed.holdMs + 1, 5, 500);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        rc = SpRect(SP_G_MINUS);
+        if (PtInRect(rc, p.x, p.y)) {
+            if (!g_spAdv) return 0;
+            g_speed.gapMs = ClampI(g_speed.gapMs - 1, 0, 2000);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        rc = SpRect(SP_G_PLUS);
+        if (PtInRect(rc, p.x, p.y)) {
+            if (!g_spAdv) return 0;
+            g_speed.gapMs = ClampI(g_speed.gapMs + 1, 0, 2000);
+            InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
         return 0;
     }
+    case WM_LBUTTONUP:
+        if (g_spDragging) {
+            g_spDragging = false;
+            ReleaseCapture();
+        }
+        return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        HDC mem = CreateCompatibleDC(hdc);
+        HBITMAP bmp = CreateCompatibleBitmap(hdc, SP_W, SP_H);
+        HGDIOBJ old = SelectObject(mem, bmp);
+        SpPaint(mem);
+        BitBlt(hdc, 0, 0, SP_W, SP_H, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteObject(bmp);
+        DeleteDC(mem);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
     case WM_CLOSE:
         DestroyWindow(hwnd);
         return 0;
@@ -1329,96 +1524,67 @@ static LRESULT CALLBACK SpeedProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 static void ShowSpeedDlg() {
+    if (g_spHwnd && IsWindow(g_spHwnd)) {
+        SetForegroundWindow(g_spHwnd);
+        return;
+    }
     HINSTANCE hi = GetModuleHandleW(NULL);
     static bool registered = false;
     if (!registered) {
         WNDCLASSEXW wc = {0};
         wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = SpeedProc;
+        wc.lpfnWndProc = SpeedWndProc;
         wc.hInstance = hi;
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"SpeedDlgWnd";
+        wc.hbrBackground = NULL;
+        wc.lpszClassName = L"SpeedGlassWnd";
         RegisterClassExW(&wc);
         registered = true;
     }
 
-    g_sd.updating = true;
-
-    int W = 460, H = 316;
-    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"SpeedDlgWnd", L"速度设置",
-                               WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                               0, 0, W, H, g_hwnd, NULL, hi, NULL);
-    if (!dlg) return;
+    g_spAdv = false;
+    g_spHot = SP_NONE;
+    g_spDragging = false;
 
     RECT pr;
     GetWindowRect(g_hwnd, &pr);
-    SetWindowPos(dlg, NULL, pr.left + ((pr.right - pr.left) - W) / 2,
-                 pr.top + ((pr.bottom - pr.top) - H) / 2, 0, 0,
-                 SWP_NOSIZE | SWP_NOZORDER);
+    int x = pr.left + ((pr.right - pr.left) - SP_W) / 2;
+    int y = pr.top + ((pr.bottom - pr.top) - SP_H) / 2;
 
-    CreateWindowExW(0, L"STATIC", L"单轮总时长（毫秒）", WS_CHILD | WS_VISIBLE,
-                    20, 18, 200, 22, dlg, NULL, hi, NULL);
-    g_sd.roundEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0000",
-                                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-                                     230, 16, 90, 26, dlg, (HMENU)10, hi, NULL);
-    CreateWindowExW(0, L"STATIC", L"越小越快", WS_CHILD | WS_VISIBLE,
-                    330, 18, 100, 22, dlg, NULL, hi, NULL);
+    HWND dlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"SpeedGlassWnd", L"速度设置",
+                               WS_POPUP, x, y, SP_W, SP_H,
+                               g_hwnd, NULL, hi, NULL);
+    if (!dlg) return;
+    g_spHwnd = dlg;
 
-    g_sd.advChk = CreateWindowExW(0, L"BUTTON", L"高级选项：单独设置每次点击时长与间隔",
-                                  WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                  20, 58, 400, 24, dlg, (HMENU)20, hi, NULL);
-
-    CreateWindowExW(0, L"STATIC", L"每次点击按住时长（毫秒）", WS_CHILD | WS_VISIBLE,
-                    20, 96, 200, 22, dlg, NULL, hi, NULL);
-    g_sd.holdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0000",
-                                    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-                                    230, 94, 90, 26, dlg, (HMENU)11, hi, NULL);
-
-    CreateWindowExW(0, L"STATIC", L"两次点击之间间隔（毫秒）", WS_CHILD | WS_VISIBLE,
-                    20, 134, 200, 22, dlg, NULL, hi, NULL);
-    g_sd.gapEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0000",
-                                   WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER,
-                                   230, 132, 90, 26, dlg, (HMENU)12, hi, NULL);
-
-    CreateWindowExW(0, L"STATIC",
-                    L"判定等待 350ms 和清零等待 30ms 是固定值，不参与加速。",
-                    WS_CHILD | WS_VISIBLE, 20, 176, 420, 22, dlg, NULL, hi, NULL);
-    CreateWindowExW(0, L"STATIC",
-                    L"改总时长会自动折算高级选项，改高级选项会自动更新总时长。",
-                    WS_CHILD | WS_VISIBLE, 20, 200, 420, 22, dlg, NULL, hi, NULL);
-
-    CreateWindowExW(0, L"BUTTON", L"确定", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                    170, 255, 110, 34, dlg, (HMENU)1, hi, NULL);
-    CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE,
-                    300, 255, 110, 34, dlg, (HMENU)2, hi, NULL);
-
-    EditSetInt(g_sd.roundEdit, SpeedRoundMs());
-    EditSetInt(g_sd.holdEdit, g_speed.holdMs);
-    EditSetInt(g_sd.gapEdit, g_speed.gapMs);
-    EnableWindow(g_sd.holdEdit, FALSE);
-    EnableWindow(g_sd.gapEdit, FALSE);
-
-    g_sd.updating = false;
+    {
+        HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+        if (dwm) {
+            typedef HRESULT (WINAPI *PFN)(HWND, DWORD, LPCVOID, DWORD);
+            PFN p = (PFN)GetProcAddress(dwm, "DwmSetWindowAttribute");
+            if (p) {
+                int pref = 2;
+                p(dlg, 33, &pref, sizeof(pref));
+            }
+        }
+    }
 
     ShowWindow(dlg, SW_SHOW);
-    SetFocus(g_sd.roundEdit);
-    SendMessageW(g_sd.roundEdit, EM_SETSEL, 0, -1);
+    UpdateWindow(dlg);
+    SetForegroundWindow(dlg);
     EnableWindow(g_hwnd, FALSE);
 
     MSG msg;
     while (IsWindow(dlg) && GetMessageW(&msg, NULL, 0, 0) > 0) {
-        if (!IsDialogMessageW(dlg, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
+    g_spHwnd = NULL;
     EnableWindow(g_hwnd, TRUE);
     SetForegroundWindow(g_hwnd);
     InvalidateRect(g_hwnd, NULL, FALSE);
 }
-
 // ============================ 窗口过程 ============================
 
 static void OnClick(int x, int y) {
